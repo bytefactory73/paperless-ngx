@@ -5,7 +5,7 @@ import {
   DragDropModule,
   moveItemInArray,
 } from '@angular/cdk/drag-drop'
-import { Component } from '@angular/core'
+import { ChangeDetectorRef, Component } from '@angular/core'
 import { RouterModule } from '@angular/router'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { TourNgBootstrapModule, TourService } from 'ngx-ui-tour-ng-bootstrap'
@@ -43,6 +43,7 @@ import { WelcomeWidgetComponent } from './widgets/welcome-widget/welcome-widget.
 })
 export class DashboardComponent extends ComponentWithPermissions {
   public dashboardViews: SavedView[] = []
+  private documentCountsSub: any
   constructor(
     public settingsService: SettingsService,
     public savedViewService: SavedViewService,
@@ -50,10 +51,20 @@ export class DashboardComponent extends ComponentWithPermissions {
     private toastService: ToastService
   ) {
     super()
-
     this.savedViewService.listAll().subscribe(() => {
-      this.dashboardViews = this.savedViewService.dashboardViews
+      this.savedViewService.maybeRefreshDocumentCounts(this.savedViewService.dashboardViews)
+      this.updateDashboardViews()
+      this.documentCountsSub = this.savedViewService.documentCountsChanged.subscribe(() => {
+        this.updateDashboardViews()
+      })
     })
+  }
+
+  updateDashboardViews() {
+    this.dashboardViews = this.savedViewService.dashboardViews.map(v => ({
+      ...v,
+      count: this.savedViewService.getDocumentCount(v) || 0
+    }))
   }
 
   get subtitle() {

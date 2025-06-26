@@ -17,6 +17,7 @@ export class SavedViewService extends AbstractPaperlessService<SavedView> {
   private savedViews: SavedView[] = []
   private savedViewDocumentCounts: Map<number, number> = new Map()
   private unsubscribeNotifier: Subject<void> = new Subject<void>()
+  public documentCountsChanged: Subject<void> = new Subject<void>()
 
   constructor(
     protected http: HttpClient,
@@ -123,9 +124,6 @@ export class SavedViewService extends AbstractPaperlessService<SavedView> {
   }
 
   public maybeRefreshDocumentCounts(views: SavedView[] = this.sidebarViews) {
-    if (!this.settingsService.get(SETTINGS_KEYS.SIDEBAR_VIEWS_SHOW_COUNT)) {
-      return
-    }
     this.unsubscribeNotifier.next() // clear previous subscriptions
     views.forEach((view) => {
       this.documentService
@@ -140,11 +138,13 @@ export class SavedViewService extends AbstractPaperlessService<SavedView> {
         .pipe(takeUntil(this.unsubscribeNotifier))
         .subscribe((results: Results<Document>) => {
           this.savedViewDocumentCounts.set(view.id, results.count)
+          this.documentCountsChanged.next()
         })
     })
   }
 
   public getDocumentCount(view: SavedView): number {
-    return this.savedViewDocumentCounts.get(view.id)
+    const count = this.savedViewDocumentCounts.get(view.id)
+    return count
   }
 }
