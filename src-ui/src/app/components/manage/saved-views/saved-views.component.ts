@@ -94,6 +94,7 @@ export class SavedViewsComponent
         page_size: view.page_size,
         display_mode: view.display_mode,
         display_fields: view.display_fields,
+        show_only_if_populated: view.show_only_if_populated,
       }
       this.savedViewsGroup.addControl(
         view.id.toString(),
@@ -105,6 +106,7 @@ export class SavedViewsComponent
           page_size: new FormControl(null),
           display_mode: new FormControl(null),
           display_fields: new FormControl([]),
+          show_only_if_populated: new FormControl(null),
         })
       )
     }
@@ -150,7 +152,10 @@ export class SavedViewsComponent
     Object.values(this.savedViewsGroup.controls)
       .filter((g: FormGroup) => !g.pristine)
       .forEach((group: FormGroup) => {
-        changed.push(group.value)
+        const value = group.value
+        // Ensure boolean for show_only_if_populated
+        value.show_only_if_populated = !!value.show_only_if_populated
+        changed.push(value)
       })
     if (changed.length) {
       this.savedViewService.patchMany(changed).subscribe({

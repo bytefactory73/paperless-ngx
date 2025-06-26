@@ -1180,6 +1180,7 @@ class SavedViewSerializer(OwnedObjectSerializer):
             "name",
             "show_on_dashboard",
             "show_in_sidebar",
+            "show_only_if_populated",
             "sort_field",
             "sort_reverse",
             "filter_rules",

@@ -46,7 +46,7 @@
           </div>
         }
         @for (v of dashboardViews; track v.id) {
-          @if (v.count > 0) {
+          @if (!v.show_only_if_populated || v.count > 0) {
             <div class="col">
               <pngx-saved-view-widget
                 [savedView]="v"

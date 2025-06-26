@@ -406,6 +406,10 @@ class SavedView(ModelWithOwner):
     show_in_sidebar = models.BooleanField(
         _("show in sidebar"),
     )
+    show_only_if_populated = models.BooleanField(
+        _("Show only if populated"),
+        default=False,
+    )
 
     sort_field = models.CharField(
         _("sort field"),

@@ -45,6 +45,7 @@ export class SaveViewConfigDialogComponent implements OnInit {
     name: new FormControl(''),
     showInSideBar: new FormControl(false),
     showOnDashboard: new FormControl(false),
+    showOnlyIfPopulated: new FormControl(false),
   })
 
   ngOnInit(): void {
