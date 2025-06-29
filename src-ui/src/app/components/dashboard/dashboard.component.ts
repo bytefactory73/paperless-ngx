@@ -48,12 +48,27 @@ export class DashboardComponent extends ComponentWithPermissions {
   private toastService = inject(ToastService)
 
   public dashboardViews: SavedView[] = []
+  private documentCountsSub: any
   constructor() {
     super()
 
     this.savedViewService.listAll().subscribe(() => {
-      this.dashboardViews = this.savedViewService.dashboardViews
+      this.savedViewService.maybeRefreshDocumentCounts(
+        this.savedViewService.dashboardViews
+      )
+      this.updateDashboardViews()
+      this.documentCountsSub =
+        this.savedViewService.documentCountsChanged.subscribe(() => {
+          this.updateDashboardViews()
+        })
     })
+  }
+
+  updateDashboardViews() {
+    this.dashboardViews = this.savedViewService.dashboardViews.map((v) => ({
+      ...v,
+      count: this.savedViewService.getDocumentCount(v) || 0,
+    }))
   }
 
   get subtitle() {
