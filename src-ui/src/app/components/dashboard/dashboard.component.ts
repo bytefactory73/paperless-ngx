@@ -5,7 +5,7 @@ import {
   DragDropModule,
   moveItemInArray,
 } from '@angular/cdk/drag-drop'
-import { ChangeDetectorRef, Component } from '@angular/core'
+import { Component, inject } from '@angular/core'
 import { RouterModule } from '@angular/router'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { TourNgBootstrapModule, TourService } from 'ngx-ui-tour-ng-bootstrap'
@@ -42,29 +42,18 @@ import { WelcomeWidgetComponent } from './widgets/welcome-widget/welcome-widget.
   ],
 })
 export class DashboardComponent extends ComponentWithPermissions {
-  public dashboardViews: SavedView[] = []
-  private documentCountsSub: any
-  constructor(
-    public settingsService: SettingsService,
-    public savedViewService: SavedViewService,
-    private tourService: TourService,
-    private toastService: ToastService
-  ) {
-    super()
-    this.savedViewService.listAll().subscribe(() => {
-      this.savedViewService.maybeRefreshDocumentCounts(this.savedViewService.dashboardViews)
-      this.updateDashboardViews()
-      this.documentCountsSub = this.savedViewService.documentCountsChanged.subscribe(() => {
-        this.updateDashboardViews()
-      })
-    })
-  }
+  settingsService = inject(SettingsService)
+  savedViewService = inject(SavedViewService)
+  private tourService = inject(TourService)
+  private toastService = inject(ToastService)
 
-  updateDashboardViews() {
-    this.dashboardViews = this.savedViewService.dashboardViews.map(v => ({
-      ...v,
-      count: this.savedViewService.getDocumentCount(v) || 0
-    }))
+  public dashboardViews: SavedView[] = []
+  constructor() {
+    super()
+
+    this.savedViewService.listAll().subscribe(() => {
+      this.dashboardViews = this.savedViewService.dashboardViews
+    })
   }
 
   get subtitle() {
