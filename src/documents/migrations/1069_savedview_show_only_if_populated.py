@@ -1,8 +1,8 @@
-from django.db import migrations, models
-import django.utils.timezone
+from django.db import migrations
+from django.db import models
+
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("documents", "1068_alter_document_created"),
     ]
@@ -14,6 +14,7 @@ class Migration(migrations.Migration):
             field=models.BooleanField(
                 verbose_name="Show only if populated",
                 default=False,
+                null=True,  # Now optional in DB
             ),
         ),
     ]

@@ -409,6 +409,7 @@ class SavedView(ModelWithOwner):
     show_only_if_populated = models.BooleanField(
         _("Show only if populated"),
         default=False,
+        null=True,  # Now optional in DB
     )
 
     sort_field = models.CharField(
