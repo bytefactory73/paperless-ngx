@@ -203,6 +203,27 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["created"], "2023-01-01")
 
+        # legacy datetime format
+        response = self.client.patch(
+            f"/api/documents/{doc.pk}/",
+            {"created": "2023-02-01T23:00:00Z"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        doc.refresh_from_db()
+        self.assertEqual(doc.created, date(2023, 2, 1))
+
+        # naive datetime
+        response = self.client.patch(
+            f"/api/documents/{doc.pk}/",
+            {"created": "2023-06-28T23:00:00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        doc.refresh_from_db()
+        self.assertEqual(doc.created, date(2023, 6, 28))
+
     def test_document_update_legacy_created_format(self):
         """
         GIVEN:
@@ -1197,13 +1218,37 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             id=str(uuid.uuid4()),
         )
 
-        with (Path(__file__).parent / "samples" / "simple.zip").open("rb") as f:
+        with (Path(__file__).parent / "samples" / "simple.bin").open("rb") as f:
             response = self.client.post(
                 "/api/documents/post_document/",
                 {"document": f},
             )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.consume_file_mock.assert_not_called()
+
+    def test_upload_zip_file(self):
+        self.consume_file_mock.return_value = celery.result.AsyncResult(
+            id=str(uuid.uuid4()),
+        )
+
+        with (Path(__file__).parent / "samples" / "simple.zip").open("rb") as f:
+            response = self.client.post(
+                "/api/documents/post_document/",
+                {"document": f},
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.consume_file_mock.assert_called_once()
+
+        input_doc, overrides = self.get_last_consume_delay_call_args()
+
+        self.assertEqual(input_doc.original_file.name, "simple.zip")
+        self.assertIn(Path(settings.SCRATCH_DIR), input_doc.original_file.parents)
+        self.assertIsNone(overrides.title)
+        self.assertIsNone(overrides.correspondent_id)
+        self.assertIsNone(overrides.document_type_id)
+        self.assertIsNone(overrides.storage_path_id)
+        self.assertIsNone(overrides.tag_ids)
 
     def test_upload_with_title(self):
         self.consume_file_mock.return_value = celery.result.AsyncResult(
