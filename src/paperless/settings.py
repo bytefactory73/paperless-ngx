@@ -1,5 +1,7 @@
 import datetime
 import json
+import logging
+import logging.config
 import math
 import multiprocessing
 import os
@@ -12,8 +14,13 @@ from urllib.parse import urlparse
 
 from celery.schedules import crontab
 from concurrent_log_handler.queue import setup_logging_queues
+from dateparser.languages.loader import LocaleDataLoader
 from django.utils.translation import gettext_lazy as _
 from dotenv import load_dotenv
+
+from paperless.utils import ocr_to_dateparser_languages
+
+logger = logging.getLogger("paperless.settings")
 
 # Tap paperless.conf if it's available
 for path in [
@@ -433,6 +440,7 @@ STORAGES = {
 _CELERY_REDIS_URL, _CHANNELS_REDIS_URL = _parse_redis_url(
     os.getenv("PAPERLESS_REDIS", None),
 )
+_REDIS_KEY_PREFIX = os.getenv("PAPERLESS_REDIS_PREFIX", "")
 
 TEMPLATES = [
     {
@@ -458,7 +466,7 @@ CHANNEL_LAYERS = {
             "hosts": [_CHANNELS_REDIS_URL],
             "capacity": 2000,  # default 100
             "expiry": 15,  # default 60
-            "prefix": os.getenv("PAPERLESS_REDIS_PREFIX", ""),
+            "prefix": _REDIS_KEY_PREFIX,
         },
     },
 }
@@ -863,6 +871,10 @@ LOGGING = {
     },
 }
 
+# Configure logging before calling any logger in settings.py so it will respect the log format, even if Django has not parsed the settings yet.
+logging.config.dictConfig(LOGGING)
+
+
 ###############################################################################
 # Task queue                                                                  #
 ###############################################################################
@@ -882,7 +894,7 @@ CELERY_SEND_TASK_SENT_EVENT = True
 CELERY_BROKER_CONNECTION_RETRY = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {
-    "global_keyprefix": os.getenv("PAPERLESS_REDIS_PREFIX", ""),
+    "global_keyprefix": _REDIS_KEY_PREFIX,
 }
 
 CELERY_TASK_TRACK_STARTED = True
@@ -903,22 +915,69 @@ CELERY_BEAT_SCHEDULE = _parse_beat_schedule()
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html#beat-schedule-filename
 CELERY_BEAT_SCHEDULE_FILENAME = str(DATA_DIR / "celerybeat-schedule.db")
 
-# django setting.
-CACHES = {
-    "default": {
-        "BACKEND": os.environ.get(
-            "PAPERLESS_CACHE_BACKEND",
-            "django.core.cache.backends.redis.RedisCache",
-        ),
-        "LOCATION": _CHANNELS_REDIS_URL,
-        "KEY_PREFIX": os.getenv("PAPERLESS_REDIS_PREFIX", ""),
-    },
-}
 
-if DEBUG and os.getenv("PAPERLESS_CACHE_BACKEND") is None:
-    CACHES["default"]["BACKEND"] = (
-        "django.core.cache.backends.locmem.LocMemCache"  # pragma: no cover
+# Cachalot: Database read cache.
+def _parse_cachalot_settings():
+    global INSTALLED_APPS
+    ttl = __get_int("PAPERLESS_READ_CACHE_TTL", 3600)
+    ttl = min(ttl, 31536000) if ttl > 0 else 3600
+    _, redis_url = _parse_redis_url(
+        os.getenv("PAPERLESS_READ_CACHE_REDIS_URL", None),
     )
+    result = {
+        "CACHALOT_CACHE": "read-cache",
+        "CACHALOT_ENABLED": __get_boolean(
+            "PAPERLESS_DB_READ_CACHE_ENABLED",
+            default="no",
+        ),
+        "CACHALOT_FINAL_SQL_CHECK": True,
+        "CACHALOT_QUERY_KEYGEN": "paperless.db_cache.custom_get_query_cache_key",
+        "CACHALOT_TABLE_KEYGEN": "paperless.db_cache.custom_get_table_cache_key",
+        "CACHALOT_REDIS_URL": redis_url,
+        "CACHALOT_TIMEOUT": ttl,
+    }
+    if result["CACHALOT_ENABLED"]:
+        INSTALLED_APPS.append("cachalot")
+    return result
+
+
+_cachalot_settings = _parse_cachalot_settings()
+CACHALOT_ENABLED = _cachalot_settings["CACHALOT_ENABLED"]
+CACHALOT_CACHE = _cachalot_settings["CACHALOT_CACHE"]
+CACHALOT_TIMEOUT = _cachalot_settings["CACHALOT_TIMEOUT"]
+CACHALOT_QUERY_KEYGEN = _cachalot_settings["CACHALOT_QUERY_KEYGEN"]
+CACHALOT_TABLE_KEYGEN = _cachalot_settings["CACHALOT_TABLE_KEYGEN"]
+CACHALOT_FINAL_SQL_CHECK = _cachalot_settings["CACHALOT_FINAL_SQL_CHECK"]
+
+
+# Django default & Cachalot cache configuration
+_CACHE_BACKEND = os.environ.get(
+    "PAPERLESS_CACHE_BACKEND",
+    "django.core.cache.backends.locmem.LocMemCache"
+    if DEBUG
+    else "django.core.cache.backends.redis.RedisCache",
+)
+
+
+def _parse_caches():
+    return {
+        "default": {
+            "BACKEND": _CACHE_BACKEND,
+            "LOCATION": _CHANNELS_REDIS_URL,
+            "KEY_PREFIX": _REDIS_KEY_PREFIX,
+        },
+        "read-cache": {
+            "BACKEND": _CACHE_BACKEND,
+            "LOCATION": _parse_cachalot_settings()["CACHALOT_REDIS_URL"],
+            "KEY_PREFIX": _REDIS_KEY_PREFIX,
+        },
+    }
+
+
+CACHES = _parse_caches()
+
+
+del _cachalot_settings
 
 
 def default_threads_per_worker(task_workers) -> int:
@@ -1117,6 +1176,84 @@ POST_CONSUME_SCRIPT = os.getenv("PAPERLESS_POST_CONSUME_SCRIPT")
 # Specify the default date order (for autodetected dates)
 DATE_ORDER = os.getenv("PAPERLESS_DATE_ORDER", "DMY")
 FILENAME_DATE_ORDER = os.getenv("PAPERLESS_FILENAME_DATE_ORDER")
+
+
+def _ocr_to_dateparser_languages(ocr_languages: str) -> list[str]:
+    """
+    Convert Tesseract OCR_LANGUAGE codes (ISO 639-2, e.g. "eng+fra", with optional scripts like "aze_Cyrl")
+    into a list of locales compatible with the `dateparser` library.
+
+    - If a script is provided (e.g., "aze_Cyrl"), attempts to use the full locale (e.g., "az-Cyrl").
+    Falls back to the base language (e.g., "az") if needed.
+    - If a language cannot be mapped or validated, it is skipped with a warning.
+    - Returns a list of valid locales, or an empty list if none could be converted.
+    """
+    ocr_to_dateparser = ocr_to_dateparser_languages()
+    loader = LocaleDataLoader()
+    result = []
+    try:
+        for ocr_language in ocr_languages.split("+"):
+            # Split into language and optional script
+            ocr_lang_part, *script = ocr_language.split("_")
+            ocr_script_part = script[0] if script else None
+
+            language_part = ocr_to_dateparser.get(ocr_lang_part)
+            if language_part is None:
+                logger.warning(
+                    f'Skipping unknown OCR language "{ocr_language}" — no dateparser equivalent.',
+                )
+                continue
+
+            # Ensure base language is supported by dateparser
+            loader.get_locale_map(locales=[language_part])
+
+            # Try to add the script part if it's supported by dateparser
+            if ocr_script_part:
+                dateparser_language = f"{language_part}-{ocr_script_part.title()}"
+                try:
+                    loader.get_locale_map(locales=[dateparser_language])
+                except Exception:
+                    logger.warning(
+                        f"Language variant '{dateparser_language}' not supported by dateparser; falling back to base language '{language_part}'. You can manually set PAPERLESS_DATE_PARSER_LANGUAGES if needed.",
+                    )
+                    dateparser_language = language_part
+            else:
+                dateparser_language = language_part
+            if dateparser_language not in result:
+                result.append(dateparser_language)
+    except Exception as e:
+        logger.warning(
+            f"Could not configure dateparser languages. Set PAPERLESS_DATE_PARSER_LANGUAGES parameter to avoid this. Detail: {e}",
+        )
+        return []
+    if not result:
+        logger.warning(
+            "Could not configure any dateparser languages from OCR_LANGUAGE — fallback to autodetection.",
+        )
+    return result
+
+
+def _parse_dateparser_languages(languages: str | None):
+    language_list = languages.split("+") if languages else []
+    # There is an unfixed issue in zh-Hant and zh-Hans locales in the dateparser lib.
+    # See: https://github.com/scrapinghub/dateparser/issues/875
+    for index, language in enumerate(language_list):
+        if language.startswith("zh-") and "zh" not in language_list:
+            logger.warning(
+                f'Chinese locale detected: {language}. dateparser might fail to parse some dates with this locale, so Chinese ("zh") will be used as a fallback.',
+            )
+            language_list.append("zh")
+
+    return list(LocaleDataLoader().get_locale_map(locales=language_list))
+
+
+if os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES"):
+    DATE_PARSER_LANGUAGES = _parse_dateparser_languages(
+        os.getenv("PAPERLESS_DATE_PARSER_LANGUAGES"),
+    )
+else:
+    DATE_PARSER_LANGUAGES = _ocr_to_dateparser_languages(OCR_LANGUAGE)
+
 
 # Maximum number of dates taken from document start to end to show as suggestions for
 # `created` date in the frontend. Duplicates are removed, which can result in
