@@ -1,3 +1,8 @@
+import {
+  CdkDragDrop,
+  DragDropModule,
+  moveItemInArray,
+} from '@angular/cdk/drag-drop'
 import { AsyncPipe, NgTemplateOutlet } from '@angular/common'
 import { HttpClient, HttpResponse } from '@angular/common/http'
 import { Component, inject, OnDestroy, OnInit, ViewChild } from '@angular/core'
@@ -175,6 +180,7 @@ export enum ZoomSetting {
     NgxBootstrapIconsModule,
     PdfViewerModule,
     TextAreaComponent,
+    DragDropModule,
   ],
 })
 export class DocumentDetailComponent
@@ -230,6 +236,8 @@ export class DocumentDetailComponent
   correspondents: Correspondent[]
   documentTypes: DocumentType[]
   storagePaths: StoragePath[]
+
+  customFieldOrderChanged: boolean = false
 
   documentForm: FormGroup = new FormGroup({
     title: new FormControl(''),
@@ -338,7 +346,20 @@ export class DocumentDetailComponent
     return {
       ...doc,
       permissions_form: { owner: doc.owner, set_permissions: doc.permissions },
+      custom_fields: this.transformCustomFieldsForForm(doc.custom_fields),
     }
+  }
+
+  private transformCustomFieldsForForm(
+    customFields: CustomFieldInstance[]
+  ): any[] {
+    return (
+      customFields?.map((fieldInstance) => ({
+        field: fieldInstance.field,
+        value: fieldInstance.value,
+        created: fieldInstance.created || null,
+      })) || []
+    )
   }
 
   private mapFormToDoc(value: any): any {
@@ -384,7 +405,9 @@ export class DocumentDetailComponent
         owner: originalDocument.owner,
         set_permissions: originalDocument.permissions,
       },
-      custom_fields: [...originalDocument.custom_fields],
+      custom_fields: this.transformCustomFieldsForForm(
+        originalDocument.custom_fields
+      ),
     })
     this.isDirty$ = dirtyCheck(this.documentForm, this.store.asObservable())
     this.isDirty$
@@ -819,7 +842,7 @@ export class DocumentDetailComponent
           }
           this.title = doc.title
           this.updateFormForCustomFields()
-          this.documentForm.patchValue(doc)
+          this.documentForm.patchValue(this.mapDocToForm(doc))
           this.documentForm.markAsPristine()
           this.openDocumentService.setDirty(doc, false)
         },
@@ -842,6 +865,24 @@ export class DocumentDetailComponent
             this.documentForm.get('permissions_form').value['owner']
           changes['set_permissions'] =
             this.documentForm.get('permissions_form').value['set_permissions']
+        } else if (key === 'custom_fields') {
+          const formValue = this.documentForm.get(key).value
+
+          const cleanedCustomFields = formValue.map((fieldData, index) => {
+            const result: any = {
+              field: fieldData.field,
+              value: fieldData.value,
+            }
+
+            // Only include created field if custom field order has been changed (reordering occurred)
+            if (this.customFieldOrderChanged) {
+              result.created = fieldData.created
+            }
+
+            return result
+          })
+
+          changes[key] = cleanedCustomFields
         } else {
           changes[key] = this.documentForm.get(key).value
         }
@@ -858,25 +899,35 @@ export class DocumentDetailComponent
       .pipe(first())
       .subscribe({
         next: (docValues) => {
-          // in case data changed while saving eg removing inbox_tags
-          this.documentForm.patchValue(docValues)
-          const newValues = Object.assign({}, this.documentForm.value)
-          newValues.tags = [...docValues.tags]
-          newValues.custom_fields = [...docValues.custom_fields]
-          this.store.next(newValues)
+          // Update form with server response, excluding custom_fields to preserve reordered state
+          const { custom_fields, ...otherDocValues } = docValues
+          this.documentForm.patchValue(otherDocValues)
+
+          // Update store with current form state, but use server tags and preserve custom field order
+          const updatedValues = {
+            ...this.documentForm.value,
+            tags: [...docValues.tags],
+            custom_fields: this.transformCustomFieldsForForm(
+              this.document.custom_fields
+            ),
+          }
+
+          this.store.next(updatedValues)
           this.openDocumentService.setDirty(this.document, false)
           this.openDocumentService.save()
+          this.documentForm.markAsPristine()
+          this.customFieldOrderChanged = false
+
           this.toastService.showInfo(
-            $localize`Document "${newValues.title}" saved successfully.`
+            $localize`Document "${updatedValues.title}" saved successfully.`
           )
           this.networkActive = false
           this.error = null
+
           if (close) {
-            this.close(() =>
-              this.openDocumentService.refreshDocument(this.documentId)
-            )
-          } else {
-            this.openDocumentService.refreshDocument(this.documentId)
+            this.close(() => {
+              // Document order preserved, no refresh needed
+            })
           }
           this.savedViewService.maybeRefreshDocumentCounts()
         },
@@ -1355,6 +1406,7 @@ export class DocumentDetailComponent
         new FormGroup({
           field: new FormControl(fieldInstance.field),
           value: new FormControl(fieldInstance.value),
+          created: new FormControl(fieldInstance.created || null),
         }),
         { emitEvent }
       )
@@ -1366,7 +1418,7 @@ export class DocumentDetailComponent
       field: field.id,
       value: null,
       document: this.documentId,
-      created: new Date(),
+      // Don't add created timestamp for new fields - only for reordering
     })
     this.updateFormForCustomFields(true)
     this.documentForm.get('custom_fields').markAsDirty()
@@ -1381,6 +1433,31 @@ export class DocumentDetailComponent
     this.updateFormForCustomFields(true)
     this.documentForm.get('custom_fields').markAsDirty()
     this.documentForm.updateValueAndValidity()
+  }
+
+  public onCustomFieldDrop(event: CdkDragDrop<CustomFieldInstance[]>) {
+    if (event.previousIndex !== event.currentIndex) {
+      // Reorder the custom fields array
+      moveItemInArray(
+        this.document.custom_fields,
+        event.previousIndex,
+        event.currentIndex
+      )
+
+      // Update the created timestamps to reflect the new order for persistence
+      const baseTime = Date.now()
+      this.document.custom_fields.forEach((field, index) => {
+        field.created = new Date(baseTime + index)
+      })
+
+      // Mark that custom field order has changed
+      this.customFieldOrderChanged = true
+
+      // Update the form to reflect the new order
+      this.updateFormForCustomFields(true)
+      this.documentForm.get('custom_fields').markAsDirty()
+      this.documentForm.markAsDirty()
+    }
   }
 
   editPdf() {

@@ -809,6 +809,7 @@ class ReadWriteSerializerMethodField(serializers.SerializerMethodField):
 class CustomFieldInstanceSerializer(serializers.ModelSerializer):
     field = serializers.PrimaryKeyRelatedField(queryset=CustomField.objects.all())
     value = ReadWriteSerializerMethodField(allow_null=True)
+    created = serializers.DateTimeField(write_only=True, required=False)
 
     def create(self, validated_data):
         # An instance is attached to a document
@@ -826,10 +827,16 @@ class CustomFieldInstanceSerializer(serializers.ModelSerializer):
 
         # Actually update or create the instance, providing the value
         # to fill in the correct attribute based on the type
+        defaults = {data_store_name: validated_data["value"]}
+
+        # If created timestamp is provided, use it to maintain custom field order
+        if "created" in validated_data:
+            defaults["created"] = validated_data["created"]
+
         instance, _ = CustomFieldInstance.objects.update_or_create(
             document=document,
             field=custom_field,
-            defaults={data_store_name: validated_data["value"]},
+            defaults=defaults,
         )
         return instance
 
@@ -947,6 +954,7 @@ class CustomFieldInstanceSerializer(serializers.ModelSerializer):
         fields = [
             "value",
             "field",
+            "created",
         ]
 
 

@@ -862,7 +862,6 @@ class CustomFieldInstance(SoftDeleteModel):
         _("created"),
         default=timezone.now,
         db_index=True,
-        editable=False,
     )
 
     document = models.ForeignKey(
