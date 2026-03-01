@@ -23,6 +23,7 @@ import {
   MatchingModel,
 } from 'src/app/data/matching-model'
 import { ObjectWithPermissions } from 'src/app/data/object-with-permissions'
+import { Results } from 'src/app/data/results'
 import {
   SortableDirective,
   SortEvent,
@@ -88,6 +89,7 @@ export abstract class ManagementListComponent<T extends MatchingModel>
   public page = 1
 
   public collectionSize = 0
+  public displayCollectionSize = 0
 
   public sortField: string
   public sortReverse: boolean
@@ -141,6 +143,14 @@ export abstract class ManagementListComponent<T extends MatchingModel>
     return data
   }
 
+  protected getCollectionSize(results: Results<T>): number {
+    return results.all?.length ?? results.count
+  }
+
+  protected getDisplayCollectionSize(results: Results<T>): number {
+    return this.getCollectionSize(results)
+  }
+
   getDocumentCount(object: MatchingModel): number {
     return (
       object.document_count ??
@@ -171,7 +181,8 @@ export abstract class ManagementListComponent<T extends MatchingModel>
         tap((c) => {
           this.unfilteredData = c.results
           this.data = this.filterData(c.results)
-          this.collectionSize = c.count
+          this.collectionSize = this.getCollectionSize(c)
+          this.displayCollectionSize = this.getDisplayCollectionSize(c)
         }),
         delay(100)
       )
@@ -364,7 +375,7 @@ export abstract class ManagementListComponent<T extends MatchingModel>
       backdrop: 'static',
     })
     modal.componentInstance.title = $localize`Confirm delete`
-    modal.componentInstance.messageBold = $localize`This operation will permanently delete all objects.`
+    modal.componentInstance.messageBold = $localize`This operation will permanently delete the selected ${this.typeNamePlural}.`
     modal.componentInstance.message = $localize`This operation cannot be undone.`
     modal.componentInstance.btnClass = 'btn-danger'
     modal.componentInstance.btnCaption = $localize`Proceed`

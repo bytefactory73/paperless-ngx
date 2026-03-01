@@ -1216,6 +1216,17 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
+    def test_upload_insufficient_permissions(self):
+        self.client.force_authenticate(user=User.objects.create_user("testuser2"))
+
+        with (Path(__file__).parent / "samples" / "simple.pdf").open("rb") as f:
+            response = self.client.post(
+                "/api/documents/post_document/",
+                {"document": f},
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
     def test_upload_empty_metadata(self):
         self.consume_file_mock.return_value = celery.result.AsyncResult(
             id=str(uuid.uuid4()),
@@ -1687,6 +1698,44 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
                 self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
         self.consume_file_mock.assert_not_called()
+
+    def test_patch_document_integer_custom_field_out_of_range(self):
+        """
+        GIVEN:
+            - An integer custom field
+            - A document
+        WHEN:
+            - Patching the document with an integer value exceeding PostgreSQL's range
+        THEN:
+            - HTTP 400 is returned (validation catches the overflow)
+            - No custom field instance is created
+        """
+        cf_int = CustomField.objects.create(
+            name="intfield",
+            data_type=CustomField.FieldDataType.INT,
+        )
+        doc = Document.objects.create(
+            title="Doc",
+            checksum="123",
+            mime_type="application/pdf",
+        )
+
+        response = self.client.patch(
+            f"/api/documents/{doc.pk}/",
+            {
+                "custom_fields": [
+                    {
+                        "field": cf_int.pk,
+                        "value": 2**31,  # overflow for PostgreSQL integer fields
+                    },
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("custom_fields", response.data)
+        self.assertEqual(CustomFieldInstance.objects.count(), 0)
 
     def test_upload_with_webui_source(self):
         """
@@ -2886,6 +2935,54 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             format="json",
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_create_share_link_requires_view_permission_for_document(self):
+        """
+        GIVEN:
+            - A user with add_sharelink but without view permission on a document
+        WHEN:
+            - API request is made to create a share link for that document
+        THEN:
+            - Share link creation is denied until view permission is granted
+        """
+        user1 = User.objects.create_user(username="test1")
+        user1.user_permissions.add(*Permission.objects.filter(codename="add_sharelink"))
+        user1.save()
+
+        user2 = User.objects.create_user(username="test2")
+        user2.save()
+
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document which will be protected",
+            owner=user2,
+        )
+
+        self.client.force_authenticate(user1)
+
+        create_resp = self.client.post(
+            "/api/share_links/",
+            data={
+                "document": doc.pk,
+                "file_version": "original",
+            },
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        assign_perm("view_document", user1, doc)
+
+        create_resp = self.client.post(
+            "/api/share_links/",
+            data={
+                "document": doc.pk,
+                "file_version": "original",
+            },
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(create_resp.data["document"], doc.pk)
 
     def test_next_asn(self):
         """

@@ -32,7 +32,6 @@ from django.db.models import Count
 from django.db.models import IntegerField
 from django.db.models import Max
 from django.db.models import Model
-from django.db.models import Q
 from django.db.models import Sum
 from django.db.models import When
 from django.db.models.functions import Length
@@ -128,6 +127,7 @@ from documents.matching import match_storage_paths
 from documents.matching import match_tags
 from documents.models import Correspondent
 from documents.models import CustomField
+from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentType
 from documents.models import Note
@@ -147,6 +147,7 @@ from documents.permissions import PaperlessAdminPermissions
 from documents.permissions import PaperlessNotePermissions
 from documents.permissions import PaperlessObjectPermissions
 from documents.permissions import ViewDocumentsPermissions
+from documents.permissions import annotate_document_count_for_related_queryset
 from documents.permissions import get_document_count_filter_for_user
 from documents.permissions import get_objects_for_user_owner_aware
 from documents.permissions import has_perms_owner_aware
@@ -370,22 +371,37 @@ class PermissionsAwareDocumentCountMixin(BulkPermissionMixin, PassUserMixin):
     Mixin to add document count to queryset, permissions-aware if needed
     """
 
+    # Default is simple relation path, override for through-table/count specialization.
+    document_count_through = None
+    document_count_source_field = None
+
     def get_document_count_filter(self):
         request = getattr(self, "request", None)
         user = getattr(request, "user", None) if request else None
         return get_document_count_filter_for_user(user)
 
     def get_queryset(self):
+        base_qs = super().get_queryset()
+
+        # Use optimized through-table counting when configured.
+        if self.document_count_through:
+            user = getattr(getattr(self, "request", None), "user", None)
+            return annotate_document_count_for_related_queryset(
+                base_qs,
+                through_model=self.document_count_through,
+                related_object_field=self.document_count_source_field,
+                user=user,
+            )
+
+        # Fallback: simple Count on relation with permission filter.
         filter = self.get_document_count_filter()
-        return (
-            super()
-            .get_queryset()
-            .annotate(document_count=Count("documents", filter=filter))
+        return base_qs.annotate(
+            document_count=Count("documents", filter=filter),
         )
 
 
 @extend_schema_view(**generate_object_with_permissions_schema(CorrespondentSerializer))
-class CorrespondentViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
+class CorrespondentViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet):
     model = Correspondent
 
     queryset = Correspondent.objects.select_related("owner").order_by(Lower("name"))
@@ -422,8 +438,10 @@ class CorrespondentViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
 
 
 @extend_schema_view(**generate_object_with_permissions_schema(TagSerializer))
-class TagViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
+class TagViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet):
     model = Tag
+    document_count_through = Document.tags.through
+    document_count_source_field = "tag_id"
 
     queryset = Tag.objects.select_related("owner").order_by(
         Lower("name"),
@@ -448,7 +466,50 @@ class TagViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context["document_count_filter"] = self.get_document_count_filter()
+        if hasattr(self, "_children_map"):
+            context["children_map"] = self._children_map
         return context
+
+    def list(self, request, *args, **kwargs):
+        """
+        Build a children map once to avoid per-parent queries in the serializer.
+        """
+        queryset = self.filter_queryset(self.get_queryset())
+        ordering = OrderingFilter().get_ordering(request, queryset, self) or (
+            Lower("name"),
+        )
+        queryset = queryset.order_by(*ordering)
+
+        all_tags = list(queryset)
+        descendant_pks = {pk for tag in all_tags for pk in tag.get_descendants_pks()}
+
+        if descendant_pks:
+            user = getattr(getattr(self, "request", None), "user", None)
+            children_source = list(
+                annotate_document_count_for_related_queryset(
+                    Tag.objects.filter(pk__in=descendant_pks | {t.pk for t in all_tags})
+                    .select_related("owner")
+                    .order_by(*ordering),
+                    through_model=self.document_count_through,
+                    related_object_field=self.document_count_source_field,
+                    user=user,
+                ),
+            )
+        else:
+            children_source = all_tags
+
+        children_map = {}
+        for tag in children_source:
+            children_map.setdefault(tag.tn_parent_id, []).append(tag)
+        self._children_map = children_map
+
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        response = self.get_paginated_response(serializer.data)
+        if descendant_pks:
+            # Include children in the "all" field, if needed
+            response.data["all"] = [tag.pk for tag in children_source]
+        return response
 
     def perform_update(self, serializer):
         old_parent = self.get_object().get_parent()
@@ -459,7 +520,7 @@ class TagViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
 
 
 @extend_schema_view(**generate_object_with_permissions_schema(DocumentTypeSerializer))
-class DocumentTypeViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
+class DocumentTypeViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet):
     model = DocumentType
 
     queryset = DocumentType.objects.select_related("owner").order_by(Lower("name"))
@@ -708,6 +769,7 @@ class DocumentViewSet(
         "title",
         "correspondent__name",
         "document_type__name",
+        "storage_path__name",
         "created",
         "modified",
         "added",
@@ -1059,7 +1121,7 @@ class DocumentViewSet(
             ):
                 return HttpResponseForbidden("Insufficient permissions to delete notes")
 
-            note = Note.objects.get(id=int(request.GET.get("id")))
+            note = Note.objects.get(id=int(request.GET.get("id")), document=doc)
             if settings.AUDIT_LOG_ENABLED:
                 LogEntry.objects.log_create(
                     instance=doc,
@@ -1663,6 +1725,8 @@ class PostDocumentView(GenericAPIView):
     parser_classes = (parsers.MultiPartParser,)
 
     def post(self, request, *args, **kwargs):
+        if not request.user.has_perm("documents.add_document"):
+            return HttpResponseForbidden("Insufficient permissions")
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -1786,6 +1850,13 @@ class SelectionDataView(GenericAPIView):
         serializer.is_valid(raise_exception=True)
 
         ids = serializer.validated_data.get("documents")
+        permitted_documents = get_objects_for_user_owner_aware(
+            request.user,
+            "documents.view_document",
+            Document,
+        )
+        if permitted_documents.filter(pk__in=ids).count() != len(ids):
+            return HttpResponseForbidden("Insufficient permissions")
 
         correspondents = Correspondent.objects.annotate(
             document_count=Count(
@@ -2302,7 +2373,7 @@ class BulkDownloadView(GenericAPIView):
 
 
 @extend_schema_view(**generate_object_with_permissions_schema(StoragePathSerializer))
-class StoragePathViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
+class StoragePathViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet):
     model = StoragePath
 
     queryset = StoragePath.objects.select_related("owner").order_by(
@@ -2347,7 +2418,10 @@ class StoragePathViewSet(ModelViewSet, PermissionsAwareDocumentCountMixin):
         """
         Test storage path against a document
         """
-        serializer = StoragePathTestSerializer(data=request.data)
+        serializer = StoragePathTestSerializer(
+            data=request.data,
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
 
         document = serializer.validated_data.get("document")
@@ -2819,7 +2893,7 @@ class WorkflowViewSet(ModelViewSet):
     )
 
 
-class CustomFieldViewSet(ModelViewSet):
+class CustomFieldViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet):
     permission_classes = (IsAuthenticated, PaperlessObjectPermissions)
 
     serializer_class = CustomFieldSerializer
@@ -2831,34 +2905,10 @@ class CustomFieldViewSet(ModelViewSet):
     filterset_class = CustomFieldFilterSet
 
     model = CustomField
+    document_count_through = CustomFieldInstance
+    document_count_source_field = "field_id"
 
     queryset = CustomField.objects.all().order_by("-created")
-
-    def get_queryset(self):
-        filter = (
-            Q(fields__document__deleted_at__isnull=True)
-            if self.request.user is None or self.request.user.is_superuser
-            else (
-                Q(
-                    fields__document__deleted_at__isnull=True,
-                    fields__document__id__in=get_objects_for_user_owner_aware(
-                        self.request.user,
-                        "documents.view_document",
-                        Document,
-                    ).values_list("id", flat=True),
-                )
-            )
-        )
-        return (
-            super()
-            .get_queryset()
-            .annotate(
-                document_count=Count(
-                    "fields",
-                    filter=filter,
-                ),
-            )
-        )
 
 
 @extend_schema_view(

@@ -193,6 +193,52 @@ def get_basic_metadata_context(
     }
 
 
+def get_safe_document_context(
+    document: Document,
+    tags: Iterable[Tag],
+) -> dict[str, object]:
+    """
+    Build a document context object to avoid supplying entire model instance.
+    """
+    return {
+        "id": document.pk,
+        "pk": document.pk,
+        "title": document.title,
+        "content": document.content,
+        "page_count": document.page_count,
+        "created": document.created,
+        "added": document.added,
+        "modified": document.modified,
+        "archive_serial_number": document.archive_serial_number,
+        "mime_type": document.mime_type,
+        "checksum": document.checksum,
+        "archive_checksum": document.archive_checksum,
+        "filename": document.filename,
+        "archive_filename": document.archive_filename,
+        "original_filename": document.original_filename,
+        "owner": {"username": document.owner.username, "id": document.owner.id}
+        if document.owner
+        else None,
+        "tags": [{"name": tag.name, "id": tag.id} for tag in tags],
+        "correspondent": (
+            {"name": document.correspondent.name, "id": document.correspondent.id}
+            if document.correspondent
+            else None
+        ),
+        "document_type": (
+            {"name": document.document_type.name, "id": document.document_type.id}
+            if document.document_type
+            else None
+        ),
+        "storage_path": {
+            "path": document.storage_path.path,
+            "id": document.storage_path.id,
+        }
+        if document.storage_path
+        else None,
+    }
+
+
 def get_tags_context(tags: Iterable[Tag]) -> dict[str, str | list[str]]:
     """
     Given an Iterable of tags, constructs some context from them for usage
@@ -262,6 +308,17 @@ def get_custom_fields_context(
     return field_data
 
 
+def _is_safe_relative_path(value: str) -> bool:
+    if value == "":
+        return True
+
+    path = PurePath(value)
+    if path.is_absolute() or path.drive:
+        return False
+
+    return ".." not in path.parts
+
+
 def validate_filepath_template_and_render(
     template_string: str,
     document: Document | None = None,
@@ -292,7 +349,7 @@ def validate_filepath_template_and_render(
 
     # Build the context dictionary
     context = (
-        {"document": document}
+        {"document": get_safe_document_context(document, tags=tags_list)}
         | get_basic_metadata_context(document, no_value_default=NO_VALUE_PLACEHOLDER)
         | get_creation_date_context(document)
         | get_added_date_context(document)
@@ -308,6 +365,12 @@ def validate_filepath_template_and_render(
             template_class=FilePathTemplate,
         )
         rendered_template = template.render(context)
+
+        if not _is_safe_relative_path(rendered_template):
+            logger.warning(
+                "Template rendered an unsafe path (absolute or containing traversal).",
+            )
+            return None
 
         # We're good!
         return rendered_template

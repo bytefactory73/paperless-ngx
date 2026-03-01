@@ -1,3 +1,7 @@
+---
+title: FAQs
+---
+
 # Frequently Asked Questions
 
 ## _What's the general plan for Paperless-ngx?_
@@ -65,8 +69,10 @@ elsewhere. Here are a couple notes about that.
 -   Zip files are supported as well. All file types mentioned above
     found in the zip will be extracted and queued for consumption.
 
-Paperless-ngx determines the type of a file by inspecting its content.
-The file extensions do not matter.
+Paperless-ngx determines the type of a file by inspecting its content
+rather than its file extensions. However, files processed via the
+consumption directory will be rejected if they have a file extension that
+not supported by any of the available parsers.
 
 ## _Will paperless-ngx run on Raspberry Pi?_
 

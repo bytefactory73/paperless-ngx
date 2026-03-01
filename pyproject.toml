@@ -1,6 +1,6 @@
 [project]
 name = "paperless-ngx"
-version = "2.20.3"
+version = "2.20.9"
 description = "A community-supported supercharged document management system: scan, index and archive all your physical documents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -96,8 +96,7 @@ dev = [
 ]
 
 docs = [
-  "mkdocs-glightbox~=0.5.1",
-  "mkdocs-material~=9.7.0",
+  "zensical>=0.0.21",
 ]
 
 testing = [
@@ -238,7 +237,7 @@ lint.isort.force-single-line = true
 
 [tool.codespell]
 write-changes = true
-ignore-words-list = "criterias,afterall,valeu,ureue,equest,ure,assertIn,Oktober"
+ignore-words-list = "criterias,afterall,valeu,ureue,equest,ure,assertIn,Oktober,commitish"
 skip = "src-ui/src/locale/*,src-ui/pnpm-lock.yaml,src-ui/e2e/*,src/paperless_mail/tests/samples/*,src/documents/tests/samples/*,*.po,*.json"
 
 [tool.pytest.ini_options]
