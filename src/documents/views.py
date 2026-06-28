@@ -49,6 +49,7 @@ from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.utils.timezone import make_aware
 from django.utils.translation import get_language
+from django.utils.translation import gettext_lazy as _
 from django.views import View
 from django.views.decorators.cache import cache_control
 from django.views.decorators.http import condition
@@ -70,10 +71,12 @@ from rest_framework import parsers
 from rest_framework import serializers
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.exceptions import ValidationError
 from rest_framework.filters import OrderingFilter
 from rest_framework.filters import SearchFilter
 from rest_framework.generics import GenericAPIView
+from rest_framework.mixins import CreateModelMixin
 from rest_framework.mixins import DestroyModelMixin
 from rest_framework.mixins import ListModelMixin
 from rest_framework.mixins import RetrieveModelMixin
@@ -487,13 +490,13 @@ class TagViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet):
             user = getattr(getattr(self, "request", None), "user", None)
             children_source = list(
                 annotate_document_count_for_related_queryset(
-                    Tag.objects.filter(pk__in=descendant_pks | {t.pk for t in all_tags})
-                    .select_related("owner")
-                    .order_by(*ordering),
+                    Tag.objects.filter(
+                        pk__in=descendant_pks | {t.pk for t in all_tags},
+                    ).select_related("owner"),
                     through_model=self.document_count_through,
                     related_object_field=self.document_count_source_field,
                     user=user,
-                ),
+                ).order_by(*ordering),
             )
         else:
             children_source = all_tags
@@ -783,7 +786,7 @@ class DocumentViewSet(
     def get_queryset(self):
         return (
             Document.objects.distinct()
-            .order_by("-created")
+            .order_by("-created", "-id")
             .annotate(num_notes=Count("notes"))
             .select_related("correspondent", "storage_path", "document_type", "owner")
             .prefetch_related("tags", "custom_fields", "notes")
@@ -1038,6 +1041,7 @@ class DocumentViewSet(
         methods=["get", "post", "delete"],
         detail=True,
         permission_classes=[PaperlessNotePermissions],
+        pagination_class=None,
         filter_backends=[],
     )
     def notes(self, request, pk=None):
@@ -1121,7 +1125,14 @@ class DocumentViewSet(
             ):
                 return HttpResponseForbidden("Insufficient permissions to delete notes")
 
-            note = Note.objects.get(id=int(request.GET.get("id")), document=doc)
+            note_id = request.GET.get("id")
+            if not note_id:
+                raise ValidationError({"id": "This field is required."})
+            try:
+                note_id_int = int(note_id)
+            except ValueError:
+                raise ValidationError({"id": "A valid integer is required."})
+            note = get_object_or_404(Note, id=note_id_int, document=doc)
             if settings.AUDIT_LOG_ENABLED:
                 LogEntry.objects.log_create(
                     instance=doc,
@@ -1368,11 +1379,28 @@ class UnifiedSearchViewSet(DocumentViewSet):
         filtered_queryset = super().filter_queryset(queryset)
 
         if self._is_search_request():
-            from documents import index
-
             if "query" in self.request.query_params:
+                from documents import index
+
                 query_class = index.DelayedFullTextQuery
             elif "more_like_id" in self.request.query_params:
+                try:
+                    more_like_doc_id = int(self.request.query_params["more_like_id"])
+                    more_like_doc = Document.objects.select_related("owner").get(
+                        pk=more_like_doc_id,
+                    )
+                except (TypeError, ValueError, Document.DoesNotExist):
+                    raise PermissionDenied(_("Invalid more_like_id"))
+
+                if not has_perms_owner_aware(
+                    self.request.user,
+                    "view_document",
+                    more_like_doc,
+                ):
+                    raise PermissionDenied(_("Insufficient permissions."))
+
+                from documents import index
+
                 query_class = index.DelayedMoreLikeThisQuery
             else:
                 raise ValueError
@@ -1408,6 +1436,8 @@ class UnifiedSearchViewSet(DocumentViewSet):
                     return response
             except NotFound:
                 raise
+            except PermissionDenied as e:
+                return HttpResponseForbidden(str(e.detail))
             except Exception as e:
                 logger.warning(f"An error occurred listing search results: {e!s}")
                 return HttpResponseBadRequest(
@@ -2111,13 +2141,21 @@ class GlobalSearchView(PassUserMixin):
         )
         groups = groups[:OBJECT_LIMIT]
         mail_rules = (
-            MailRule.objects.filter(name__icontains=query)
+            get_objects_for_user_owner_aware(
+                request.user,
+                "view_mailrule",
+                MailRule,
+            ).filter(name__icontains=query)
             if request.user.has_perm("paperless_mail.view_mailrule")
             else []
         )
         mail_rules = mail_rules[:OBJECT_LIMIT]
         mail_accounts = (
-            MailAccount.objects.filter(name__icontains=query)
+            get_objects_for_user_owner_aware(
+                request.user,
+                "view_mailaccount",
+                MailAccount,
+            ).filter(name__icontains=query)
             if request.user.has_perm("paperless_mail.view_mailaccount")
             else []
         )
@@ -2672,7 +2710,14 @@ class TasksViewSet(ReadOnlyModelViewSet):
             )
 
 
-class ShareLinkViewSet(ModelViewSet, PassUserMixin):
+class ShareLinkViewSet(
+    PassUserMixin,
+    CreateModelMixin,
+    RetrieveModelMixin,
+    DestroyModelMixin,
+    ListModelMixin,
+    GenericViewSet,
+):
     model = ShareLink
 
     queryset = ShareLink.objects.all()

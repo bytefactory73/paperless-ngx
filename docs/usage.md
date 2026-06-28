@@ -381,7 +381,7 @@ still have "object-level" permissions.
 | StoragePath   | Add, edit, delete or view Storage Paths.                                                                                                                                                                                        |
 | Tag           | Add, edit, delete or view Tags.                                                                                                                                                                                                 |
 | UISettings    | Add, edit, delete or view the UI settings that are used by the web app.<br/>:warning: **Users that will access the web UI must be granted at least _View_ permissions.**                                                        |
-| User          | Add, edit, delete or view Users.                                                                                                                                                                                                |
+| User          | Add, edit, delete or view other user accounts via Settings > Users & Groups and `/api/users/`. These permissions are not needed for users to edit their own profile via "My Profile" or `/api/profile/`.                        |
 | Workflow      | Add, edit, delete or view Workflows.<br/>Note that Workflows are global; all users who can access workflows see the same set. Workflows have other permission implications — see [Workflow permissions](#workflow-permissions). |
 
 #### Detailed Explanation of Object Permissions {#object-permissions}
@@ -391,6 +391,8 @@ still have "object-level" permissions.
 | Owner | By default objects are only visible and editable by their owner.<br/>Only the object owner can grant permissions to other users or groups.<br/>Additionally, only document owners can create share links and add / remove custom fields.<br/>For backwards compatibility objects can have no owner which makes them visible to any user. |
 | View  | Confers the ability to view (not edit) a document, tag, etc.<br/>Users without 'view' (or higher) permissions will be shown _'Private'_ in place of the object name for example when viewing a document with a tag for which the user doesn't have permissions.                                                                          |
 | Edit  | Confers the ability to edit (and view) a document, tag, etc.                                                                                                                                                                                                                                                                             |
+
+For related metadata such as tags, correspondents, document types, and storage paths, object visibility and document assignment are intentionally distinct. A user may still retain or submit a known object ID when editing a document even if that related object is displayed as _Private_ or omitted from search and selection results. This allows documents to preserve existing assignments that the current user cannot necessarily inspect in detail.
 
 ### Password reset
 
@@ -570,7 +572,7 @@ applied. You can use the following placeholders in the template with any trigger
 -   `{{added_day}}`: added day
 -   `{{added_time}}`: added time in HH:MM format
 -   `{{original_filename}}`: original file name without extension
--   `{{filename}}`: current file name without extension
+-   `{{filename}}`: current file name without extension (for "added" workflows this may not be final yet, you can use `{{original_filename}}`)
 -   `{{doc_title}}`: current document title
 
 The following placeholders are only available for "added" or "updated" triggers

@@ -1,5 +1,9 @@
+from django.utils.translation import gettext as _
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 
+from documents.permissions import get_objects_for_user_owner_aware
+from documents.permissions import has_perms_owner_aware
 from documents.serialisers import CorrespondentField
 from documents.serialisers import DocumentTypeField
 from documents.serialisers import OwnedObjectSerializer
@@ -56,7 +60,18 @@ class MailAccountSerializer(OwnedObjectSerializer):
 
 class AccountField(serializers.PrimaryKeyRelatedField):
     def get_queryset(self):
-        return MailAccount.objects.all().order_by("-id")
+        user = getattr(self.context.get("request"), "user", None)
+        if user is None:
+            user = getattr(self.root, "user", None)
+
+        if user is None:
+            return MailAccount.objects.none()
+
+        return get_objects_for_user_owner_aware(
+            user,
+            "change_mailaccount",
+            MailAccount,
+        ).order_by("-id")
 
 
 class MailRuleSerializer(OwnedObjectSerializer):
@@ -126,6 +141,18 @@ class MailRuleSerializer(OwnedObjectSerializer):
             raise serializers.ValidationError("An action parameter is required.")
 
         return attrs
+
+    def validate_account(self, account):
+        if self.user is not None and has_perms_owner_aware(
+            self.user,
+            "change_mailaccount",
+            account,
+        ):
+            return account
+
+        raise PermissionDenied(
+            _("Insufficient permissions."),
+        )
 
     def validate_maximum_age(self, value):
         if value > 36500:  # ~100 years

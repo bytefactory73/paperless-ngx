@@ -1087,6 +1087,43 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         self.assertEqual(len(response.data["all"]), 50)
         self.assertCountEqual(response.data["all"], [d.id for d in docs])
 
+    def test_default_ordering_uses_id_as_tiebreaker(self):
+        """
+        GIVEN:
+            - Documents sharing the same created date
+        WHEN:
+            - API request for documents without an explicit ordering
+        THEN:
+            - Results are correctly ordered by created > id
+        """
+        older_doc = Document.objects.create(
+            checksum="older",
+            content="older",
+            created=date(2024, 1, 1),
+        )
+        first_same_date_doc = Document.objects.create(
+            checksum="same-date-1",
+            content="same-date-1",
+            created=date(2024, 1, 2),
+        )
+        second_same_date_doc = Document.objects.create(
+            checksum="same-date-2",
+            content="same-date-2",
+            created=date(2024, 1, 2),
+        )
+
+        response = self.client.get("/api/documents/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            [result["id"] for result in response.data["results"]],
+            [
+                second_same_date_doc.id,
+                first_same_date_doc.id,
+                older_doc.id,
+            ],
+        )
+
     def test_statistics(self):
         doc1 = Document.objects.create(
             title="none1",
@@ -2714,6 +2751,77 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         # modified was updated to today
         self.assertEqual(doc.modified.day, timezone.now().day)
 
+    def test_delete_note_missing_id(self) -> None:
+        """
+        GIVEN:
+            - Existing document
+        WHEN:
+            - API DELETE request to notes endpoint without an id query param
+            - API DELETE request to notes endpoint with an empty id query param
+        THEN:
+            - HTTP 400 is returned
+        """
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document",
+        )
+
+        response = self.client.delete(
+            f"/api/documents/{doc.pk}/notes/",
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        response = self.client.delete(
+            f"/api/documents/{doc.pk}/notes/?id=",
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_delete_note_invalid_id(self) -> None:
+        """
+        GIVEN:
+            - Existing document
+        WHEN:
+            - API DELETE request to notes endpoint with a non-integer note id
+        THEN:
+            - HTTP 400 is returned
+        """
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document",
+        )
+
+        response = self.client.delete(
+            f"/api/documents/{doc.pk}/notes/?id=notaninteger",
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_delete_note_nonexistent_id(self) -> None:
+        """
+        GIVEN:
+            - Existing document, no notes
+        WHEN:
+            - API DELETE request to notes endpoint with a non-existent note id
+        THEN:
+            - HTTP 404 is returned
+        """
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="this is a document",
+        )
+
+        response = self.client.delete(
+            f"/api/documents/{doc.pk}/notes/?id=99999",
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
     def test_get_notes_no_doc(self):
         """
         GIVEN:
@@ -2983,6 +3091,58 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         )
         self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
         self.assertEqual(create_resp.data["document"], doc.pk)
+
+    def test_share_link_update_methods_not_allowed(self):
+        """
+        GIVEN:
+            - An existing share link
+        WHEN:
+            - PUT and PATCH requests are made to its detail endpoint
+        THEN:
+            - The API rejects them with 405 and the link is unchanged
+        """
+        doc = Document.objects.create(
+            title="test",
+            mime_type="application/pdf",
+            content="share link content",
+        )
+        expiration = timezone.now() + timedelta(days=7)
+        create_resp = self.client.post(
+            "/api/share_links/",
+            data={
+                "document": doc.pk,
+                "expiration": expiration.isoformat(),
+                "file_version": ShareLink.FileVersion.ORIGINAL,
+            },
+            format="json",
+        )
+        self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
+        share_link_id = create_resp.data["id"]
+
+        patch_resp = self.client.patch(
+            f"/api/share_links/{share_link_id}/",
+            data={
+                "expiration": None,
+                "file_version": ShareLink.FileVersion.ARCHIVE,
+            },
+            format="json",
+        )
+        self.assertEqual(patch_resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        put_resp = self.client.put(
+            f"/api/share_links/{share_link_id}/",
+            data={
+                "document": doc.pk,
+                "expiration": None,
+                "file_version": ShareLink.FileVersion.ARCHIVE,
+            },
+            format="json",
+        )
+        self.assertEqual(put_resp.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        share_link = ShareLink.objects.get(pk=share_link_id)
+        self.assertEqual(share_link.file_version, ShareLink.FileVersion.ORIGINAL)
+        self.assertIsNotNone(share_link.expiration)
 
     def test_next_asn(self):
         """

@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import logging
 import tempfile
 from pathlib import Path
@@ -165,6 +166,52 @@ class TestFileHandling(DirectoriesMixin, FileSystemAssertsMixin, TestCase):
                 settings.ORIGINALS_DIR / "none" / "none.pdf",
             )
             self.assertEqual(document.filename, "none/none.pdf")
+
+    @override_settings(FILENAME_FORMAT=None)
+    def test_stale_save_recovers_already_moved_files(self) -> None:
+        old_storage_path = StoragePath.objects.create(
+            name="old-path",
+            path="old/{{title}}",
+        )
+        new_storage_path = StoragePath.objects.create(
+            name="new-path",
+            path="new/{{title}}",
+        )
+        original_bytes = b"original"
+        archive_bytes = b"archive"
+
+        doc = Document.objects.create(
+            title="document",
+            mime_type="application/pdf",
+            checksum=hashlib.md5(original_bytes).hexdigest(),
+            archive_checksum=hashlib.md5(archive_bytes).hexdigest(),
+            filename="old/document.pdf",
+            archive_filename="old/document.pdf",
+            storage_path=old_storage_path,
+        )
+        create_source_path_directory(doc.source_path)
+        doc.source_path.write_bytes(original_bytes)
+        create_source_path_directory(doc.archive_path)
+        doc.archive_path.write_bytes(archive_bytes)
+
+        stale_doc = Document.objects.get(pk=doc.pk)
+        fresh_doc = Document.objects.get(pk=doc.pk)
+        fresh_doc.storage_path = new_storage_path
+        fresh_doc.save()
+        doc.refresh_from_db()
+        self.assertEqual(doc.filename, "new/document.pdf")
+        self.assertEqual(doc.archive_filename, "new/document.pdf")
+
+        stale_doc.storage_path = new_storage_path
+        stale_doc.save()
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.filename, "new/document.pdf")
+        self.assertEqual(doc.archive_filename, "new/document.pdf")
+        self.assertIsFile(doc.source_path)
+        self.assertIsFile(doc.archive_path)
+        self.assertIsNotFile(settings.ORIGINALS_DIR / "old" / "document.pdf")
+        self.assertIsNotFile(settings.ARCHIVE_DIR / "old" / "document.pdf")
 
     @override_settings(FILENAME_FORMAT="{correspondent}/{correspondent}")
     def test_document_delete(self):
@@ -1341,6 +1388,41 @@ class TestFilenameGeneration(DirectoriesMixin, TestCase):
             Path("somepath/asn-201-400/asn-3xx/Does Matter.pdf"),
         )
 
+    def test_template_related_context_keeps_legacy_string_coercion(self):
+        """
+        GIVEN:
+            - A storage path template that uses related objects directly as strings
+        WHEN:
+            - Filepath for a document with this format is called
+        THEN:
+            - Related objects coerce to their names (legacy behavior)
+            - Explicit attribute access remains available for new templates
+        """
+        sp = StoragePath.objects.create(
+            name="PARTNER",
+            path=(
+                "{{ document.storage_path|lower }} / "
+                "{{ document.correspondent|lower|replace('mi:', 'mieter/') }} / "
+                "{{ document_type|lower }} / "
+                "{{ title|lower }}"
+            ),
+        )
+        doc = Document.objects.create(
+            title="scan_017562",
+            created=datetime.date(2025, 7, 2),
+            added=timezone.make_aware(datetime.datetime(2026, 3, 3, 11, 53, 16)),
+            mime_type="application/pdf",
+            checksum="test-checksum",
+            storage_path=sp,
+            correspondent=Correspondent.objects.create(name="mi:kochkach"),
+            document_type=DocumentType.objects.create(name="Mietvertrag"),
+        )
+
+        self.assertEqual(
+            generate_filename(doc),
+            Path("partner/mieter/kochkach/mietvertrag/scan_017562.pdf"),
+        )
+
     @override_settings(
         FILENAME_FORMAT="{{creation_date}}/{{ title_name_str }}",
     )
@@ -1698,6 +1780,21 @@ class TestCustomFieldFilenameUpdates(
         self.assertEqual(Path(self.doc.filename), expected_filename)
         self.assertTrue(Path(self.doc.source_path).is_file())
         self.assertLessEqual(m.call_count, 1)
+
+    @override_settings(FILENAME_FORMAT=None)
+    def test_overlong_storage_path_keeps_existing_filename(self):
+        initial_filename = generate_filename(self.doc)
+        Document.objects.filter(pk=self.doc.pk).update(filename=str(initial_filename))
+        self.doc.refresh_from_db()
+        Path(self.doc.source_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.doc.source_path).touch()
+
+        self.doc.storage_path = StoragePath.objects.create(path="a" * 1100)
+        self.doc.save()
+
+        self.doc.refresh_from_db()
+        self.assertEqual(Path(self.doc.filename), initial_filename)
+        self.assertTrue(Path(self.doc.source_path).is_file())
 
 
 class TestPathDateLocalization:
