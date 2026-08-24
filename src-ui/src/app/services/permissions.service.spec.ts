@@ -6,6 +6,11 @@ import {
   PermissionsService,
 } from './permissions.service'
 
+const VIEW_ONLY_PERMISSION_TYPES = new Set<PermissionType>([
+  PermissionType.GlobalStatistics,
+  PermissionType.SystemMonitoring,
+])
+
 describe('PermissionsService', () => {
   let permissionsService: PermissionsService
 
@@ -102,6 +107,18 @@ describe('PermissionsService', () => {
     expect(permissionsService.getPermissionKeys('view_document')).toEqual({
       actionKey: 'View', // PermissionAction.View
       typeKey: 'Document', // PermissionType.Document
+    })
+    expect(
+      permissionsService.getPermissionKeys('view_global_statistics')
+    ).toEqual({
+      actionKey: 'View', // PermissionAction.View
+      typeKey: 'GlobalStatistics', // PermissionType.GlobalStatistics
+    })
+    expect(
+      permissionsService.getPermissionKeys('view_system_monitoring')
+    ).toEqual({
+      actionKey: 'View', // PermissionAction.View
+      typeKey: 'SystemMonitoring', // PermissionType.SystemMonitoring
     })
   })
 
@@ -264,6 +281,8 @@ describe('PermissionsService', () => {
         'change_applicationconfiguration',
         'delete_applicationconfiguration',
         'view_applicationconfiguration',
+        'view_global_statistics',
+        'view_system_monitoring',
       ],
       {
         username: 'testuser',
@@ -274,7 +293,10 @@ describe('PermissionsService', () => {
 
     Object.values(PermissionType).forEach((type) => {
       Object.values(PermissionAction).forEach((action) => {
-        expect(permissionsService.currentUserCan(action, type)).toBeTruthy()
+        expect(permissionsService.currentUserCan(action, type)).toBe(
+          !VIEW_ONLY_PERMISSION_TYPES.has(type) ||
+            action === PermissionAction.View
+        )
       })
     })
 
